@@ -1,0 +1,47 @@
+{
+  "name": "stet",
+  "version": "0.1.0",
+  "description": "Cloud bursting for TypeScript — AWS parallel map",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "bin": {
+    "stet": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@aws-sdk/client-ecr": "^3.0.0",
+    "@aws-sdk/client-ecs": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "esbuild": "^0.20.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.6.0",
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run tests/unit",
+    "test:integration": "BURST_INTEGRATION_TEST=1 vitest run tests/integration",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scttfrdmn/stet"
+  },
+  "license": "MIT"
+}
