@@ -56,12 +56,12 @@ export interface SubstrateServer {
 
 export async function startSubstrateServer(): Promise<SubstrateServer> {
   const port = await freePort()
-  const proc: ChildProcess = spawn('substrate', ['server', '--port', String(port)], {
+  const proc: ChildProcess = spawn('substrate', ['server', '--address', `:${port}`], {
     stdio: 'ignore',
   })
 
   const url = `http://localhost:${port}`
-  await waitForHealth(`${url}/v1/health`)
+  await waitForHealth(`${url}/health`)
 
   return {
     url,
@@ -73,7 +73,7 @@ export async function startSubstrateServer(): Promise<SubstrateServer> {
 }
 
 export async function resetSubstrate(url: string): Promise<void> {
-  await fetch(`${url}/v1/reset`, { method: 'POST' })
+  await fetch(`${url}/v1/state/reset`, { method: 'POST' })
 }
 
 export interface TestConfig {
@@ -110,7 +110,14 @@ export async function writeTestConfig(substrateUrl: string): Promise<TestConfig>
 }
 
 export async function createBucket(s3: S3Client, bucket: string): Promise<void> {
-  await s3.send(new CreateBucketCommand({ Bucket: bucket }))
+  try {
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }))
+  } catch (e: unknown) {
+    if ((e as { name?: string }).name !== 'BucketAlreadyExists' &&
+        (e as { name?: string }).name !== 'BucketAlreadyOwnedByYou') {
+      throw e
+    }
+  }
 }
 
 /**
