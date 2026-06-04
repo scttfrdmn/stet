@@ -363,7 +363,7 @@ export class Session {
 		}
 	}
 
-	private async _pollUntilDone(
+	async _pollUntilDone(
 		s3: S3Client,
 		sessionId: string,
 		chunkCount: number,
