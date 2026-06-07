@@ -1,16 +1,8 @@
 /**
- * Integration tests for stet using substrate as an AWS emulator.
+ * Integration tests for stet.
  *
- * These tests verify the full orchestration pipeline:
- *   - task file upload to S3
- *   - ECS RunTask calls (mocked at _launchWorkers)
- *   - S3 polling and result collection
- *   - result ordering
- *
- * Since ECS workers won't actually execute inside substrate, we use
- * simulateWorkers() to write result files directly.
- *
- * Requires: BURST_INTEGRATION_TEST=1 and substrate in PATH.
+ * Substrate (default): BURST_INTEGRATION_TEST=1
+ * Real AWS:            BURST_INTEGRATION_TEST=1  (with real AWS credentials, no AWS_ENDPOINT_URL)
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
@@ -20,6 +12,7 @@ import {
   startSubstrateServer,
   resetSubstrate,
   writeTestConfig,
+  makeS3Client,
   createBucket,
   simulateWorkers,
   type SubstrateServer,
@@ -38,14 +31,9 @@ let s3: S3Client
 
 beforeAll(async () => {
   substrateServer = await startSubstrateServer()
-  testConfig = await writeTestConfig(substrateServer.url)
+  testConfig = await writeTestConfig(substrateServer)
   cfg = await loadConfig()
-  s3 = new S3Client({
-    region: testConfig.region,
-    endpoint: substrateServer.url,
-    forcePathStyle: true,
-    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
-  })
+  s3 = await makeS3Client(substrateServer, testConfig.region)
 }, 30000)
 
 afterAll(async () => {
@@ -53,8 +41,8 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
-  await resetSubstrate(substrateServer.url)
-  await createBucket(s3, testConfig.s3Bucket)
+  await resetSubstrate(substrateServer)
+  await createBucket(s3, testConfig.s3Bucket, testConfig.region)
 })
 
 function makeSession(overrides?: Partial<Parameters<typeof Session>[0]>): Session {
@@ -95,7 +83,6 @@ describe('out-of-order chunk completion', () => {
     const fn = (x: unknown) => (x as number) ** 2
 
     const session = makeSession({ workers: 5 })
-    const { S3Client: _S3 } = await import('@aws-sdk/client-s3')
     const { PutObjectCommand } = await import('@aws-sdk/client-s3')
     const { serialize } = await import('node:v8')
     const { taskId } = await import('../../src/session.js')
@@ -103,24 +90,19 @@ describe('out-of-order chunk completion', () => {
     vi.spyOn(session, '_launchWorkers').mockImplementation(
       async (_ecs, _s3client, sessionId) => {
         const chunks = chunkItems(items, 5)
-        // Write in reverse order to test ordering
         for (let i = chunks.length - 1; i >= 0; i--) {
           const results = chunks[i]!.map((x) => (x as number) ** 2)
           const buf = serialize(results)
-          await s3.send(
-            new PutObjectCommand({
-              Bucket: testConfig.s3Bucket,
-              Key: `sessions/${sessionId}/tasks/${taskId(i)}.result`,
-              Body: buf,
-            }),
-          )
-          await s3.send(
-            new PutObjectCommand({
-              Bucket: testConfig.s3Bucket,
-              Key: `sessions/${sessionId}/tasks/${taskId(i)}.status`,
-              Body: Buffer.from('done'),
-            }),
-          )
+          await s3.send(new PutObjectCommand({
+            Bucket: testConfig.s3Bucket,
+            Key: `sessions/${sessionId}/tasks/${taskId(i)}.result`,
+            Body: buf,
+          }))
+          await s3.send(new PutObjectCommand({
+            Bucket: testConfig.s3Bucket,
+            Key: `sessions/${sessionId}/tasks/${taskId(i)}.status`,
+            Body: Buffer.from('done'),
+          }))
         }
       },
     )
@@ -134,7 +116,6 @@ describe('task files in S3', () => {
   it('task files are present before workers launch', async () => {
     const items = [1, 2, 3, 4, 5]
     const fn = (x: unknown) => (x as number) + 1
-    const { encodeTaskFile } = await import('../../src/serialize.js')
     const bundle = Buffer.from('fake bundle')
 
     const session = makeSession({ workers: 2 })
@@ -142,17 +123,13 @@ describe('task files in S3', () => {
 
     vi.spyOn(session, '_launchWorkers').mockImplementation(
       async (_ecs, _s3client, sessionId, _uri, chunkCount) => {
-        // At launch time, task files should be in S3
-        const resp = await s3.send(
-          new ListObjectsV2Command({
-            Bucket: testConfig.s3Bucket,
-            Prefix: `sessions/${sessionId}/tasks/`,
-          }),
-        )
+        const resp = await s3.send(new ListObjectsV2Command({
+          Bucket: testConfig.s3Bucket,
+          Prefix: `sessions/${sessionId}/tasks/`,
+        }))
         for (const obj of resp.Contents ?? []) {
           if (obj.Key) taskFilesAtLaunch.push(obj.Key)
         }
-        // Simulate workers
         await simulateWorkers(s3, testConfig.s3Bucket, sessionId, items, fn, chunkCount)
       },
     )
@@ -181,12 +158,10 @@ describe('manifest', () => {
 
     await session.run(items, fn, 'fake-uri', Buffer.from('bundle'))
 
-    const resp = await s3.send(
-      new GetObjectCommand({
-        Bucket: testConfig.s3Bucket,
-        Key: `sessions/${capturedSessionId}/manifest.json`,
-      }),
-    )
+    const resp = await s3.send(new GetObjectCommand({
+      Bucket: testConfig.s3Bucket,
+      Key: `sessions/${capturedSessionId}/manifest.json`,
+    }))
     const chunks: Buffer[] = []
     for await (const chunk of resp.Body as AsyncIterable<Uint8Array>) {
       chunks.push(Buffer.from(chunk))
@@ -214,12 +189,10 @@ describe('cleanup', () => {
 
     await session.run(items, fn, 'fake-uri', Buffer.from('bundle'))
 
-    const resp = await s3.send(
-      new ListObjectsV2Command({
-        Bucket: testConfig.s3Bucket,
-        Prefix: `sessions/${capturedSessionId}/`,
-      }),
-    )
+    const resp = await s3.send(new ListObjectsV2Command({
+      Bucket: testConfig.s3Bucket,
+      Prefix: `sessions/${capturedSessionId}/`,
+    }))
 
     const keys = (resp.Contents ?? []).map((o) => o.Key ?? '')
     const taskFiles = keys.filter((k) => !k.endsWith('manifest.json'))
