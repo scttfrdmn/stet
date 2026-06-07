@@ -15,6 +15,8 @@ export interface BurstOptions {
 	timeout?: number;
 	region?: string;
 	signal?: AbortSignal;
+	/** CPU architecture for ECS task ("amd64" or "arm64"). Defaults to "amd64". */
+	arch?: string;
 }
 
 export function parseMemoryGb(memory: string): number {
@@ -88,6 +90,7 @@ export class Executor {
 			maxCost: opts.maxCost,
 			costAlert: opts.costAlert,
 			timeout: opts.timeout,
+			arch: opts.arch,
 		});
 
 		const results = await session.run(

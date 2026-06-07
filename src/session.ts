@@ -100,7 +100,12 @@ function makeManifest(
 }
 
 function s3Client(cfg: Config): S3Client {
-	return new S3Client({ region: cfg.region });
+	const endpointUrl = process.env['AWS_ENDPOINT_URL']
+	return new S3Client({
+		region: cfg.region,
+		forcePathStyle: true,
+		...(endpointUrl ? { endpoint: endpointUrl } : {}),
+	})
 }
 
 function ecsClient(cfg: Config): ECSClient {
@@ -159,6 +164,8 @@ export interface SessionOptions {
 	maxCost?: number;
 	costAlert?: number;
 	timeout?: number;
+	/** CPU architecture for ECS task ("amd64" or "arm64"). Defaults to "amd64". */
+	arch?: string;
 }
 
 export class Session {
@@ -171,6 +178,7 @@ export class Session {
 	private readonly _maxCost?: number;
 	private readonly _costAlert?: number;
 	private readonly _timeout?: number;
+	private readonly _arch: string;
 
 	constructor(options: SessionOptions) {
 		this._cfg = options.cfg;
@@ -182,6 +190,7 @@ export class Session {
 		this._maxCost = options.maxCost;
 		this._costAlert = options.costAlert;
 		this._timeout = options.timeout;
+		this._arch = options.arch ?? "amd64";
 	}
 
 	async run(
@@ -329,6 +338,11 @@ export class Session {
 		imageUri: string,
 		chunkCount: number,
 	): Promise<void> {
+		// TODO: stet passes imageUri directly as taskDefinition, which bypasses
+		// proper task def registration. To support arch (ARM64/X86_64) and
+		// CloudWatch logging, this should call registerTaskDefinition with a
+		// runtimePlatform block (similar to adder) and use the returned ARN here.
+		// this._arch is available ("amd64" | "arm64") for use when implemented.
 		for (let i = 0; i < chunkCount; i++) {
 			const tid = taskId(i);
 			await ecs.send(
