@@ -1,7 +1,14 @@
 import { randomBytes } from "node:crypto";
 import {
+	DescribeSecurityGroupsCommand,
+	DescribeSubnetsCommand,
+	DescribeVpcsCommand,
+	EC2Client,
+} from "@aws-sdk/client-ec2";
+import {
 	DescribeTasksCommand,
 	ECSClient,
+	RegisterTaskDefinitionCommand,
 	RunTaskCommand,
 	StopTaskCommand,
 } from "@aws-sdk/client-ecs";
@@ -100,16 +107,20 @@ function makeManifest(
 }
 
 function s3Client(cfg: Config): S3Client {
-	const endpointUrl = process.env['AWS_ENDPOINT_URL']
+	const endpointUrl = process.env.AWS_ENDPOINT_URL;
 	return new S3Client({
 		region: cfg.region,
 		forcePathStyle: true,
 		...(endpointUrl ? { endpoint: endpointUrl } : {}),
-	})
+	});
 }
 
 function ecsClient(cfg: Config): ECSClient {
 	return new ECSClient({ region: cfg.region });
+}
+
+function ec2Client(cfg: Config): EC2Client {
+	return new EC2Client({ region: cfg.region });
 }
 
 async function s3Get(
@@ -222,6 +233,7 @@ export class Session {
 		const sessionId = generateSessionId();
 		const s3 = s3Client(this._cfg);
 		const ecs = ecsClient(this._cfg);
+		const ec2 = ec2Client(this._cfg);
 
 		const actualWorkers = Math.min(this._workers, items.length);
 		const chunks = chunkItems(items, actualWorkers);
@@ -292,7 +304,7 @@ export class Session {
 		);
 
 		// Step 3: Launch ECS workers
-		await this._launchWorkers(ecs, s3, sessionId, imageUri, chunkCount);
+		await this._launchWorkers(ecs, ec2, s3, sessionId, imageUri, chunkCount);
 		printSubmitted(chunkCount);
 
 		// Step 4: Poll until done
@@ -333,22 +345,88 @@ export class Session {
 
 	async _launchWorkers(
 		ecs: ECSClient,
+		ec2: EC2Client,
 		s3: S3Client,
 		sessionId: string,
 		imageUri: string,
 		chunkCount: number,
 	): Promise<void> {
-		// TODO: stet passes imageUri directly as taskDefinition, which bypasses
-		// proper task def registration. To support arch (ARM64/X86_64) and
-		// CloudWatch logging, this should call registerTaskDefinition with a
-		// runtimePlatform block (similar to adder) and use the returned ARN here.
-		// this._arch is available ("amd64" | "arm64") for use when implemented.
+		// Register a task definition with logging and arch support
+		const family = `burst-${sessionId}`;
+		const cpuArch = this._arch === "arm64" ? "ARM64" : "X86_64";
+		const regOut = await ecs.send(
+			new RegisterTaskDefinitionCommand({
+				family,
+				taskRoleArn: this._cfg.taskRoleArn,
+				executionRoleArn: this._cfg.executionRoleArn,
+				networkMode: "awsvpc",
+				requiresCompatibilities: ["FARGATE"],
+				cpu: String(this._cpu * 1024),
+				memory: String(this._memoryGb * 1024),
+				runtimePlatform: {
+					cpuArchitecture: cpuArch,
+					operatingSystemFamily: "LINUX",
+				},
+				containerDefinitions: [
+					{
+						name: "worker",
+						image: imageUri,
+						essential: true,
+						environment: [
+							{ name: "BURST_S3_BUCKET", value: this._cfg.s3Bucket },
+							{ name: "BURST_REGION", value: this._cfg.region },
+							{ name: "BURST_LANG", value: "typescript" },
+						],
+						logConfiguration: {
+							logDriver: "awslogs",
+							options: {
+								"awslogs-group": "/burst/workers",
+								"awslogs-region": this._cfg.region,
+								"awslogs-stream-prefix": "burst",
+								"awslogs-create-group": "true",
+							},
+						},
+					},
+				],
+			}),
+		);
+		const taskDefArn = regOut.taskDefinition?.taskDefinitionArn;
+		if (!taskDefArn) throw new Error("registerTaskDefinition returned no ARN");
+
+		// Discover default VPC subnets and security group
+		const vpcsOut = await ec2.send(
+			new DescribeVpcsCommand({
+				Filters: [{ Name: "isDefault", Values: ["true"] }],
+			}),
+		);
+		const vpcId = vpcsOut.Vpcs?.[0]?.VpcId ?? "";
+		const subnetsOut = await ec2.send(
+			new DescribeSubnetsCommand({
+				Filters: [{ Name: "vpc-id", Values: [vpcId] }],
+			}),
+		);
+		const subnets = (subnetsOut.Subnets ?? [])
+			.map((s) => s.SubnetId ?? "")
+			.filter(Boolean);
+		const sgsOut = await ec2.send(
+			new DescribeSecurityGroupsCommand({
+				Filters: [
+					{ Name: "vpc-id", Values: [vpcId] },
+					{ Name: "group-name", Values: ["default"] },
+				],
+			}),
+		);
+		const securityGroups = (sgsOut.SecurityGroups ?? [])
+			.map((g) => g.GroupId ?? "")
+			.filter(Boolean);
+
+		// Launch one task per chunk with per-task env overrides
 		for (let i = 0; i < chunkCount; i++) {
 			const tid = taskId(i);
 			await ecs.send(
 				new RunTaskCommand({
 					cluster: this._cfg.ecsCluster,
-					taskDefinition: imageUri,
+					taskDefinition: taskDefArn,
 					launchType: this._backend === "fargate" ? "FARGATE" : "EC2",
 					overrides: {
 						containerOverrides: [
@@ -357,8 +435,7 @@ export class Session {
 								environment: [
 									{ name: "BURST_SESSION_ID", value: sessionId },
 									{ name: "BURST_TASK_ID", value: tid },
-									{ name: "BURST_S3_BUCKET", value: this._cfg.s3Bucket },
-									{ name: "BURST_REGION", value: this._cfg.region },
+									{ name: "BURST_FUNCTION_NAME", value: "" },
 								],
 							},
 						],
@@ -367,7 +444,8 @@ export class Session {
 						this._backend === "fargate"
 							? {
 									awsvpcConfiguration: {
-										subnets: [],
+										subnets,
+										securityGroups,
 										assignPublicIp: "ENABLED",
 									},
 								}

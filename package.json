@@ -20,6 +20,7 @@
     "dist"
   ],
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.1063.0",
     "@aws-sdk/client-ecr": "^3.0.0",
     "@aws-sdk/client-ecs": "^3.0.0",
     "@aws-sdk/client-s3": "^3.0.0",
