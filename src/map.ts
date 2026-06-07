@@ -12,3 +12,16 @@ export async function map<T, U>(
 		await executor.shutdown();
 	}
 }
+
+export async function mapTolerant<T, U>(
+	items: T[],
+	fn: (item: T) => Promise<U> | U,
+	options?: BurstOptions,
+): Promise<(U | null)[]> {
+	const executor = new Executor(options);
+	try {
+		return await executor.mapTolerant(fn, items);
+	} finally {
+		await executor.shutdown();
+	}
+}

@@ -204,6 +204,30 @@ export class Session {
 		this._arch = options.arch ?? "amd64";
 	}
 
+	async runTolerant<T, U>(
+		items: T[],
+		fn: (...args: unknown[]) => unknown,
+		imageUri: string,
+		bundle: Buffer,
+		signal?: AbortSignal,
+	): Promise<(U | null)[]> {
+		try {
+			const results = await this.run(
+				items as unknown[],
+				fn,
+				imageUri,
+				bundle,
+				signal,
+			);
+			return results as (U | null)[];
+		} catch (err) {
+			if (err instanceof BurstPartialError) {
+				return err.results as (U | null)[];
+			}
+			throw err;
+		}
+	}
+
 	async run(
 		items: unknown[],
 		fn: (...args: unknown[]) => unknown,

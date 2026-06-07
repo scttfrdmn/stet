@@ -103,6 +103,59 @@ export class Executor {
 		return results as U[];
 	}
 
+	async mapTolerant<T, U>(
+		fn: (item: T) => Promise<U> | U,
+		items: T[],
+		overrides?: BurstOptions,
+	): Promise<(U | null)[]> {
+		if (this._shutdown) {
+			throw new Error("Executor has been shut down");
+		}
+
+		const opts = { ...this._options, ...overrides };
+
+		const { loadConfig } = await import("./config.js");
+		let cfg: Config = await loadConfig();
+		if (opts.region) {
+			cfg = { ...cfg, region: opts.region };
+		}
+
+		const { bundleFunction } = await import("./bundle.js");
+		const { resolveWorkerImage } = await import("./env.js");
+
+		const workers = opts.workers ?? cfg.defaultWorkers;
+		const cpu = opts.cpu ?? cfg.defaultCpu;
+		const memoryGb = opts.memory
+			? parseMemoryGb(opts.memory)
+			: cfg.defaultMemoryGb;
+
+		const bundleResult: BundleResult = await bundleFunction(
+			fn as (...args: unknown[]) => unknown,
+		);
+		const imageUri = await resolveWorkerImage(bundleResult, cfg);
+
+		const session = new Session({
+			cfg,
+			workers,
+			cpu,
+			memoryGb,
+			backend: opts.backend ?? cfg.backend,
+			spot: opts.spot ?? cfg.spot,
+			maxCost: opts.maxCost,
+			costAlert: opts.costAlert,
+			timeout: opts.timeout,
+			arch: opts.arch,
+		});
+
+		return session.runTolerant<T, U>(
+			items,
+			fn as (...args: unknown[]) => unknown,
+			imageUri,
+			bundleResult.bundle,
+			opts.signal,
+		);
+	}
+
 	async shutdown(): Promise<void> {
 		this._shutdown = true;
 	}
